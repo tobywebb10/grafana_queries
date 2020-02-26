@@ -1,0 +1,7 @@
+SELECT
+  max(ts) as time,
+  count(DISTINCT boxid) as Total
+FROM
+  hf_inducted_boxes
+WHERE
+  $__timeFilter(ts) AND country = 'NZ' AND boxid NOT LIKE '%test%' AND boxid NOT LIKE '%Dummy%'

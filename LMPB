@@ -1,0 +1,149 @@
+with first_timestamp_by_box AS
+(
+            SELECT
+              i.Country,
+              i.Line,
+              i.City,
+              min(i.ts) as timestmp,
+              count(p.pipelineid) as labor,
+              i.boxid
+            FROM
+              hf_inducted_boxes i LEFT JOIN hf_pick_times p on i.boxid = p.boxid
+            WHERE
+              $__timeFilter(i.ts) AND i.country = 'NZ' AND i.city = 'Auckland' AND i.boxid NOT LIKE '%test%' AND i.boxid NOT LIKE '%Dummy%' AND
+              (configname = 'GeneratedZones BC' or configname = 'GeneratedZones' or configname = 'Gen2_BC' or configname = 'Gen2 - BC')
+            GROUP BY
+              i.boxid,
+              i.line,
+              i.country,
+              i.city
+            order by 1,2,3,4
+),
+time_since_last_box AS
+(
+       SELECT
+            country,
+            line,
+            city,
+            timestmp,
+            boxid,
+            labor,
+            EXTRACT(Epoch from timestmp) - lag(EXTRACT(Epoch from timestmp),1) over(partition by country,line,city order by timestmp) as time_since_last_box
+FROM first_timestamp_by_box
+order by 1,2,3,4
+),
+breaks AS
+(
+        SELECT
+            country,
+            line,
+            city,
+            timestmp,
+            boxid,
+            labor,
+            time_since_last_box,
+            CASE
+                WHEN time_since_last_box/60 >20
+                    THEN 1
+                ELSE 0
+            END AS break
+        from time_since_last_box
+        order by 1,2,3,4
+),
+boxes_in_row AS
+(
+     SELECT
+          country,
+          line,
+          city,
+          timestmp,
+          boxid,
+          labor
+          time_since_last_box,
+          break,
+          max(case when break != 1 then 0 ElsE EXTRACT(Epoch from timestmp) end) over(PARTITION By country,line,city order by timestmp desc rows between current row and unbounded following) as next_break_at
+      FROM breaks
+          order by 1,2,3,4
+),
+throughput as
+(
+  SELECT
+      country,
+      line,
+      city,
+      timestmp,
+      boxid,
+      time_since_last_box,
+      break,
+      count(boxid) over(partition by country,line,city,next_break_at) as produced_boxes_in_row,
+      (MAX(EXTRACT(EPOCH from timestmp)) OVER(partition by country,line,city,next_break_at)- MIN(EXTRACT(EPOCH from timestmp)) OVER(partition by country,line,city,next_break_at))/60 as active_minutes
+  FROM boxes_in_row
+  order by 1,2,3,4
+),
+labor AS
+(
+    SELECT
+        t.boxid,p.pipelineid
+    FROM
+        throughput t  lEFT JOIN hf_pick_times p ON t.boxid = p.boxid
+    GROUP BY
+        1,2
+),
+throughput2 AS
+(
+ SELECT
+      country,
+      line,
+      city,
+      produced_boxes_in_row,
+      active_minutes,
+      count(distinct l.pipelineid) as workers,
+      CASE
+        WHEN country = 'DE'
+            THEN 13
+        WHEN country = 'UK'
+            THEN 14
+        WHEN country = 'SE'
+            THEN 12
+        WHEN country = 'AU' and city = 'Sydney'
+            THEN 15
+        WHEN country = 'AU' and city = 'Perth'
+            THEN 12
+        WHEN country = 'NZ'
+            THEN 15        
+        WHEN country = 'CA' and city = 'Vancouver' and line = 'Langley1'
+            THEN 14
+        WHEN country = 'CA' and city = 'Vancouver' and line = 'YVR1'
+            THEN 14
+        WHEN country = 'CA' and city = 'Timberlea'
+            THEN 13
+        WHEN country = 'CA' and city = 'Edmonton'
+            THEN 14
+        ELSE 0
+    END as support_workers
+FROM
+  throughput t left join labor l on t.boxid = l.boxid
+GROUP BY 1,2,3,4,5
+HAVING count(distinct l.pipelineid) >=5
+)
+,
+final AS
+(
+    SELECT
+        country,
+        line,
+        city,
+        produced_boxes_in_row,
+        active_minutes,
+        workers,
+        support_workers,
+        ((produced_boxes_in_row)/sum(produced_boxes_in_row) over(partition by line))*(active_minutes*(workers+support_workers)/produced_boxes_in_row) as mmpb_containing_support_workers
+    FROM
+        throughput2
+    group by 1,2,3,4,5,6,7
+)
+select line,
+        0 as time,
+       sum(mmpb_containing_support_workers) as mmpb
+       from final 
+       group by line order by line

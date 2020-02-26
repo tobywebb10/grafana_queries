@@ -1,0 +1,22 @@
+SELECT SUM(n) as weighted_labor
+from(
+            SELECT
+              line,
+              (count(distinct p.pipelineid) + 15)*(CAST(count(distinct boxid) as float)/CAST(max(total_boxes.n)AS FLOAT)) as n
+            FROM
+              hf_pick_times p 
+            LEFT JOIN 
+            (
+              select 
+                count(distinct boxid) as n 
+              from 
+                hf_pick_times
+              WHERE $__timeFilter(ts) 
+                AND country ='NZ'
+              )total_boxes
+              on 1=1
+            WHERE $__timeFilter(p.ts) 
+              AND p.country ='NZ'
+            GROUP BY 1
+            HAVING COUNT(distinct p.pipelineid) >0
+        )a
